@@ -1,22 +1,14 @@
-// Jenkinsfile for car-website
+// Jenkinsfile for car-website (Static Web Deployment)
 // Repository: https://github.com/deekshithar95/car-website
 
 pipeline {
     agent any
     
-    tools {
-        // If using specific tool versions
-        // maven 'Maven-3.8.4'  // Uncomment if needed
-    }
-    
     environment {
         // ===== CONFIGURATION =====
-        // Replace these with your actual values
-        EC2_USER = 'demo1'
-        EC2_IP = '18.212.79.123'
+        EC2_USER = 'ubuntu'
+        EC2_IP = '18.212.79.123'  // REPLACE WITH YOUR EC2 IP
         APP_DIR = '/var/www/car-website'
-        DOCKER_IMAGE = 'car-website'
-        HOST_PORT = '80'
         REPO_URL = 'https://github.com/deekshithar95/car-website.git'
         BRANCH = 'main'
         // ==========================
@@ -34,7 +26,7 @@ pipeline {
         stage('Initialize') {
             steps {
                 echo '=========================================='
-                echo 'Starting car-website CI/CD Pipeline'
+                echo '🚀 Starting car-website Deployment Pipeline'
                 echo "Repository: ${REPO_URL}"
                 echo "Branch: ${BRANCH}"
                 echo "Environment: ${params.DEPLOY_ENV}"
@@ -44,153 +36,162 @@ pipeline {
         
         stage('Checkout') {
             steps {
-                echo '📦 Checking out code from GitHub...'
+                echo '📦 Checking out code...'
                 checkout([
                     $class: 'GitSCM',
                     branches: [[name: "*/${BRANCH}"]],
                     userRemoteConfigs: [[url: REPO_URL]],
-                    extensions: [
-                        [$class: 'CleanBeforeCheckout'],
-                        [$class: 'CloneOption', depth: 1, noTags: true, reference: '', shallow: true]
-                    ]
+                    extensions: [[$class: 'CleanBeforeCheckout']]
                 ])
                 echo '✅ Code checkout complete!'
                 
-                // Display repository files
+                // Display files
                 sh 'echo "Repository files:" && ls -la'
             }
         }
         
-        stage('Validate Project') {
+        stage('Validate Website') {
             steps {
-                echo '🔍 Validating project structure...'
+                echo '🔍 Validating website files...'
                 script {
-                    // Check if Dockerfile exists
-                    if (fileExists('Dockerfile')) {
-                        echo '✅ Dockerfile found!'
-                    } else {
-                        error '❌ Dockerfile not found in repository!'
-                    }
-                    
                     // Check if index.html exists
                     if (fileExists('index.html')) {
                         echo '✅ index.html found!'
                     } else {
-                        error '❌ index.html not found in repository!'
+                        error '❌ index.html not found!'
                     }
                     
-                    // Display HTML files
-                    sh 'find . -name "*.html" | head -10'
+                    // Count HTML files
+                    def htmlCount = sh(
+                        script: 'find . -name "*.html" | wc -l',
+                        returnStdout: true
+                    ).trim()
+                    echo "📄 Found ${htmlCount} HTML files"
                 }
             }
         }
         
-        stage('Build Docker Image') {
-            steps {
-                echo '🐳 Building Docker image...'
-                script {
-                    sh """
-                        docker build -t ${DOCKER_IMAGE}:latest .
-                        docker tag ${DOCKER_IMAGE}:latest ${DOCKER_IMAGE}:${BUILD_NUMBER}
-                        docker images | grep ${DOCKER_IMAGE}
-                    """
-                }
-                echo '✅ Docker image built successfully!'
-            }
-        }
-        
-        stage('Static Analysis') {
-            steps {
-                echo '🔎 Running static analysis on HTML/CSS...'
-                script {
-                    // Check for broken HTML syntax
-                    sh '''
-                        echo "Checking HTML files..."
-                        for file in *.html; do
-                            echo "  ✓ Checking \$file"
-                            # Validate HTML syntax (using html-tidy if available)
-                            tidy -errors \$file 2>/dev/null || echo "    ⚠️  tidy not installed, skipping validation"
-                        done
-                    '''
-                }
-            }
-        }
-        
-        stage('Deploy to EC2') {
+        stage('Deploy to Production') {
             when {
                 expression { params.DEPLOY_ENV == 'production' }
             }
             steps {
-                echo '🚀 Deploying to EC2 production server...'
+                echo '🚀 Deploying to production...'
                 script {
-                    withCredentials([sshUserPrivateKey(
-                        credentialsId: 'ec2-ssh-key',
-                        keyFileVariable: 'SSH_KEY',
-                        usernameVariable: 'EC2_USER'
-                    )]) {
-                        sh """
-                            ssh -o StrictHostKeyChecking=no -i ${SSH_KEY} ${EC2_USER}@${EC2_IP} << 'ENDSSH'
-                                set -e
-                                echo "Connected to EC2 instance..."
-                                
-                                # Setup application directory
-                                mkdir -p ${APP_DIR}
-                                cd ${APP_DIR}
-                                
-                                # Pull latest code
-                                echo "📦 Updating code..."
-                                if [ ! -d ".git" ]; then
-                                    git clone ${REPO_URL} .
-                                else
-                                    git pull origin ${BRANCH}
-                                fi
-                                
-                                # Build and deploy with Docker
-                                echo "🐳 Building Docker image..."
-                                docker build -t ${DOCKER_IMAGE}:latest .
-                                
-                                # Stop old container
-                                echo "🔄 Stopping old container..."
-                                docker stop ${DOCKER_IMAGE}-container 2>/dev/null || true
-                                docker rm ${DOCKER_IMAGE}-container 2>/dev/null || true
-                                
-                                # Run new container
-                                echo "🚀 Starting new container..."
-                                docker run -d --name ${DOCKER_IMAGE}-container \
-                                    --restart unless-stopped \
-                                    -p ${HOST_PORT}:80 \
-                                    ${DOCKER_IMAGE}:latest
-                                
-                                # Verify container is running
-                                sleep 3
-                                echo "📊 Container status:"
-                                docker ps | grep ${DOCKER_IMAGE}-container
-                                
-                                echo "✅ Deployment complete!"
-                            ENDSSH
-                        """
-                    }
+                    // Using rsync to copy files
+                    sh """
+                        # Install rsync if not available
+                        which rsync || sudo apt install rsync -y
+                        
+                        # Create directory on EC2
+                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_IP} "sudo mkdir -p ${APP_DIR}"
+                        
+                        # Copy files to EC2
+                        rsync -avz --delete -e "ssh -o StrictHostKeyChecking=no" \
+                            --exclude='.git' \
+                            --exclude='Jenkinsfile' \
+                            --exclude='README.md' \
+                            ./ ${EC2_USER}@${EC2_IP}:${APP_DIR}/
+                    """
+                    
+                    // Configure web server
+                    sh """
+                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_IP} << 'ENDSSH'
+                            set -e
+                            
+                            # Set proper permissions
+                            sudo chown -R www-data:www-data ${APP_DIR}
+                            sudo chmod -R 755 ${APP_DIR}
+                            
+                            # Create Nginx configuration
+                            sudo tee /etc/nginx/sites-available/car-website << 'NGINXCONF'
+server {
+    listen 80;
+    server_name _;
+    root ${APP_DIR};
+    index index.html;
+    
+    # Enable gzip compression
+    gzip on;
+    gzip_types text/html text/css text/javascript application/javascript;
+    
+    # Cache static files
+    location ~* \.(css|js|jpg|jpeg|png|gif|ico|svg)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+    
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+}
+NGINXCONF
+                            
+                            # Enable site
+                            sudo ln -sf /etc/nginx/sites-available/car-website /etc/nginx/sites-enabled/
+                            
+                            # Remove default site if exists
+                            sudo rm -f /etc/nginx/sites-enabled/default
+                            
+                            # Test and reload Nginx
+                            sudo nginx -t
+                            sudo systemctl reload nginx
+                            
+                            echo "✅ Nginx configured!"
+                            echo "🌐 Website: http://${EC2_IP}"
+                        ENDSSH
+                    """
                 }
             }
         }
         
-        stage('Staging Deployment') {
+        stage('Deploy to Staging') {
             when {
                 expression { params.DEPLOY_ENV == 'staging' }
             }
             steps {
-                echo '🧪 Deploying to staging environment...'
+                echo '🧪 Deploying to staging...'
                 script {
-                    // Use different port for staging
+                    def stagingDir = '/var/www/car-website-staging'
                     def stagingPort = '8081'
+                    
                     sh """
-                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_IP} << ENDSSH
-                            cd ${APP_DIR}
-                            docker pull ${DOCKER_IMAGE}:latest || true
-                            docker build -t ${DOCKER_IMAGE}:staging .
-                            docker stop ${DOCKER_IMAGE}-staging 2>/dev/null || true
-                            docker rm ${DOCKER_IMAGE}-staging 2>/dev/null || true
-                            docker run -d --name ${DOCKER_IMAGE}-staging -p ${stagingPort}:80 ${DOCKER_IMAGE}:staging
+                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_IP} << 'ENDSSH'
+                            set -e
+                            
+                            # Create staging directory
+                            sudo mkdir -p ${stagingDir}
+                            
+                            # Copy files
+                            rsync -avz --delete ./ ${stagingDir}/
+                            
+                            # Set permissions
+                            sudo chown -R www-data:www-data ${stagingDir}
+                            sudo chmod -R 755 ${stagingDir}
+                            
+                            # Create Nginx config for staging
+                            sudo tee /etc/nginx/sites-available/car-website-staging << 'STAGINGCONF'
+server {
+    listen ${stagingPort};
+    server_name _;
+    root ${stagingDir};
+    index index.html;
+    
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+}
+STAGINGCONF
+                            
+                            # Enable staging site
+                            sudo ln -sf /etc/nginx/sites-available/car-website-staging /etc/nginx/sites-enabled/
+                            
+                            # Test and reload Nginx
+                            sudo nginx -t
+                            sudo systemctl reload nginx
+                            
+                            echo "✅ Staging deployment complete!"
+                            echo "🌐 Staging: http://${EC2_IP}:${stagingPort}"
                         ENDSSH
                     """
                 }
@@ -201,19 +202,17 @@ pipeline {
             steps {
                 echo '🩺 Performing health check...'
                 script {
-                    // Wait for application to start
-                    sleep time: 5, unit: 'SECONDS'
+                    sleep time: 3, unit: 'SECONDS'
                     
-                    // Test the endpoint
                     def statusCode = sh(
-                        script: "curl -s -o /dev/null -w '%{http_code}' http://${EC2_IP}:${HOST_PORT}",
+                        script: "curl -s -o /dev/null -w '%{http_code}' http://${EC2_IP}",
                         returnStdout: true
                     ).trim()
                     
                     if (statusCode == '200' || statusCode == '304') {
-                        echo "✅ Health check passed! Status: ${statusCode}"
+                        echo "✅ Website is running (Status: ${statusCode})"
                     } else {
-                        echo "⚠️  Health check returned: ${statusCode}"
+                        echo "⚠️  Website returned: ${statusCode}"
                     }
                 }
             }
@@ -224,30 +223,25 @@ pipeline {
         success {
             echo '''
                 ╔══════════════════════════════════════════════╗
-                ║        🎉 DEPLOYMENT SUCCESSFUL! 🎉        ║
+                ║      ✅ DEPLOYMENT SUCCESSFUL! ✅           ║
                 ╠══════════════════════════════════════════════╣
-                ║  Website: http://''' + env.EC2_IP + '''      ║
-                ║  Image:   ''' + env.DOCKER_IMAGE + '''     ║
-                ║  Build:   #''' + env.BUILD_NUMBER + '''    ║
+                ║  Production: http://''' + env.EC2_IP + '''   ║
+                ║  Build:     #''' + env.BUILD_NUMBER + '''   ║
                 ╚══════════════════════════════════════════════╝
             '''
         }
         failure {
             echo '''
                 ╔══════════════════════════════════════════════╗
-                ║        ❌ DEPLOYMENT FAILED! ❌             ║
+                ║         ❌ DEPLOYMENT FAILED! ❌            ║
                 ╠══════════════════════════════════════════════╣
-                ║  Check the logs above for error details.    ║
+                ║  Check Jenkins console for details.         ║
                 ╚══════════════════════════════════════════════╝
             '''
         }
         cleanup {
             echo '🧹 Cleaning up workspace...'
-            script {
-                sh '''
-                    docker system prune -f || true
-                '''
-            }
+            sh 'rm -rf * || true'
         }
     }
 }
