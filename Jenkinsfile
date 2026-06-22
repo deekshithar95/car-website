@@ -72,78 +72,52 @@ pipeline {
         }
         
         stage('Deploy to Production') {
-            when {
-                expression { params.DEPLOY_ENV == 'production' }
-            }
-            steps {
-                echo '🚀 Deploying to production...'
-                script {
-                    // Using rsync to copy files
-                    sh """
-                        # Install rsync if not available
-                        which rsync || sudo apt install rsync -y
-                        
-                        # Create directory on EC2
-                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_IP} "sudo mkdir -p ${APP_DIR}"
-                        
-                        # Copy files to EC2
-                        rsync -avz --delete -e "ssh -o StrictHostKeyChecking=no" \
-                            --exclude='.git' \
-                            --exclude='Jenkinsfile' \
-                            --exclude='README.md' \
-                            ./ ${EC2_USER}@${EC2_IP}:${APP_DIR}/
-                    """
-                    
-                    // Configure web server
-                    sh """
-                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_IP} << 'ENDSSH'
-                            set -e
-                            
-                            # Set proper permissions
-                            sudo chown -R www-data:www-data ${APP_DIR}
-                            sudo chmod -R 755 ${APP_DIR}
-                            
-                            # Create Nginx configuration
-                            sudo tee /etc/nginx/sites-available/car-website << 'NGINXCONF'
-server {
-    listen 80;
-    server_name _;
-    root ${APP_DIR};
-    index index.html;
-    
-    # Enable gzip compression
-    gzip on;
-    gzip_types text/html text/css text/javascript application/javascript;
-    
-    # Cache static files
-    location ~* \.(css|js|jpg|jpeg|png|gif|ico|svg)$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
+    when {
+        expression { params.DEPLOY_ENV == 'production' }
     }
-    
-    location / {
-        try_files \$uri \$uri/ =404;
+    steps {
+        echo '🚀 Deploying to production...'
+        script {
+            sh """
+                # Copy website files
+                rsync -avz --delete -e "ssh -o StrictHostKeyChecking=no" \
+                    --exclude='.git' \
+                    --exclude='Jenkinsfile' \
+                    --exclude='*.conf' \
+                    --exclude='README.md' \
+                    ./ ${EC2_USER}@${EC2_IP}:${APP_DIR}/
+                
+                # Copy the Nginx configuration file
+                scp -o StrictHostKeyChecking=no car-website.conf ${EC2_USER}@${EC2_IP}:/tmp/
+                
+                # Configure Nginx on the server
+                ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_IP} << 'ENDSSH'
+                    set -e
+                    
+                    # Set proper permissions
+                    sudo chown -R www-data:www-data ${APP_DIR}
+                    sudo chmod -R 755 ${APP_DIR}
+                    
+                    # Move the configuration to the correct location
+                    sudo mv /tmp/car-website.conf /etc/nginx/sites-available/
+                    
+                    # Enable the site
+                    sudo ln -sf /etc/nginx/sites-available/car-website /etc/nginx/sites-enabled/
+                    
+                    # Remove default site if exists
+                    sudo rm -f /etc/nginx/sites-enabled/default
+                    
+                    # Test and reload Nginx
+                    sudo nginx -t
+                    sudo systemctl reload nginx
+                    
+                    echo "✅ Nginx configured!"
+                    echo "🌐 Website: http://${EC2_IP}"
+                ENDSSH
+            """
+        }
     }
 }
-NGINXCONF
-                            
-                            # Enable site
-                            sudo ln -sf /etc/nginx/sites-available/car-website /etc/nginx/sites-enabled/
-                            
-                            # Remove default site if exists
-                            sudo rm -f /etc/nginx/sites-enabled/default
-                            
-                            # Test and reload Nginx
-                            sudo nginx -t
-                            sudo systemctl reload nginx
-                            
-                            echo "✅ Nginx configured!"
-                            echo "🌐 Website: http://${EC2_IP}"
-                        ENDSSH
-                    """
-                }
-            }
-        }
         
         stage('Deploy to Staging') {
             when {
